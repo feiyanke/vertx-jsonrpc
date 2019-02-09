@@ -22,6 +22,7 @@ import java.util.regex.Pattern;
 
 import static com.googlecode.jsonrpc4j.ErrorResolver.JsonError.ERROR_NOT_HANDLED;
 import static com.googlecode.jsonrpc4j.ReflectionUtil.findCandidateMethods;
+import static com.googlecode.jsonrpc4j.ReflectionUtil.findBestMethodByParamsNode;
 import static com.googlecode.jsonrpc4j.ReflectionUtil.getParameterTypes;
 import static com.googlecode.jsonrpc4j.Util.hasNonNullData;
 
@@ -47,17 +48,14 @@ public class JsonRpcBasicServer {
 	public static final String EXCEPTION_TYPE_NAME = "exceptionTypeName";
 	public static final String VERSION = "2.0";
 	public static final int CODE_OK = 0;
-	public static final String WEB_PARAM_ANNOTATION_CLASS_LOADER = "javax.jws.WebParam";
-	public static final String NAME = "name";
 	public static final String NULL = "null";
 	private static final Logger logger = LoggerFactory.getLogger(JsonRpcBasicServer.class);
 	private static final ErrorResolver DEFAULT_ERROR_RESOLVER = new MultipleErrorResolver(AnnotationsErrorResolver.INSTANCE, DefaultErrorResolver.INSTANCE);
 	private static Pattern BASE64_PATTERN = Pattern.compile("[A-Za-z0-9_=-]+");
-	private static Class<? extends Annotation> WEB_PARAM_ANNOTATION_CLASS;
-	private static Method WEB_PARAM_NAME_METHOD;
+
 	
 	static {
-		loadAnnotationSupportEngine();
+		ReflectionUtil.loadAnnotationSupportEngine();
 	}
 	
 	private final ObjectMapper mapper;
@@ -66,12 +64,9 @@ public class JsonRpcBasicServer {
 	protected HttpStatusCodeProvider httpStatusCodeProvider = null;
 	private boolean backwardsCompatible = true;
 	private boolean rethrowExceptions = false;
-	private boolean allowExtraParams = false;
-	private boolean allowLessParams = false;
 	private RequestInterceptor requestInterceptor = null;
 	private ErrorResolver errorResolver = null;
 	private InvocationListener invocationListener = null;
-	private ConvertedParameterTransformer convertedParameterTransformer = null;
 	private boolean shouldLogInvocationErrors = true;
 	private List<JsonRpcInterceptor> interceptorList = new ArrayList<>();
 	
@@ -124,16 +119,6 @@ public class JsonRpcBasicServer {
 	 */
 	public JsonRpcBasicServer(final Object handler) {
 		this(new ObjectMapper(), handler, null);
-	}
-	
-	private static void loadAnnotationSupportEngine() {
-		final ClassLoader classLoader = JsonRpcBasicServer.class.getClassLoader();
-		try {
-			WEB_PARAM_ANNOTATION_CLASS = classLoader.loadClass(WEB_PARAM_ANNOTATION_CLASS_LOADER).asSubclass(Annotation.class);
-			WEB_PARAM_NAME_METHOD = WEB_PARAM_ANNOTATION_CLASS.getMethod(NAME);
-		} catch (ClassNotFoundException | NoSuchMethodException e) {
-			logger.error("Could not find {}.{}", WEB_PARAM_ANNOTATION_CLASS_LOADER, NAME, e);
-		}
 	}
 	
 	/**
@@ -313,7 +298,7 @@ public class JsonRpcBasicServer {
 	private boolean isError(JsonError result) {
 		return result.code != JsonError.OK.code;
 	}
-	
+
 	/**
 	 * Handles the given {@link ObjectNode} and writes the
 	 * responses to the given {@link OutputStream}.
@@ -339,7 +324,7 @@ public class JsonRpcBasicServer {
 		final String fullMethodName = node.get(METHOD).asText();
 		final String partialMethodName = getMethodName(fullMethodName);
 		final String serviceName = getServiceName(fullMethodName);
-		
+
 		Set<Method> methods = findCandidateMethods(getHandlerInterfaces(serviceName), partialMethodName);
 		if (methods.isEmpty()) {
 			return writeAndFlushValueError(output, createResponseError(jsonRpc, id, JsonError.METHOD_NOT_FOUND));
@@ -359,7 +344,7 @@ public class JsonRpcBasicServer {
 					interceptor.preHandle(target, methodArgs.method, methodArgs.arguments);
 				}
 				// invocation
-				JsonNode result = invoke(target, methodArgs.method, methodArgs.arguments);
+				JsonNode result = ReflectionUtil.invoke(target, methodArgs.method, methodArgs.arguments);
 				handler.result = result;
 				// interceptors postHandle
 				for (JsonRpcInterceptor interceptor : interceptorList) {
@@ -458,91 +443,7 @@ public class JsonRpcBasicServer {
 	protected Object getHandler(String serviceName) {
 		return handler;
 	}
-	
-	/**
-	 * Invokes the given method on the {@code handler} passing
-	 * the given params (after converting them to beans\objects)
-	 * to it.
-	 *
-	 * @param target optional service name used to locate the target object
-	 *               to invoke the Method on
-	 * @param method the method to invoke
-	 * @param params the params to pass to the method
-	 * @return the return value (or null if no return)
-	 * @throws IOException               on error
-	 * @throws IllegalAccessException    on error
-	 * @throws InvocationTargetException on error
-	 */
-	private JsonNode invoke(Object target, Method method, List<JsonNode> params) throws IOException, IllegalAccessException, InvocationTargetException {
-		logger.debug("Invoking method: {} with args {}", method.getName(), params);
 
-		Object result;
-
-        if (method.getGenericParameterTypes().length == 1 && method.isVarArgs()) {
-			Class<?> componentType = method.getParameterTypes()[0].getComponentType();
-			result = componentType.isPrimitive() ?
-				invokePrimitiveVarargs(target, method, params, componentType) :
-				invokeNonPrimitiveVarargs(target, method, params, componentType);
-        } else {
-            Object[] convertedParams = convertJsonToParameters(method, params);
-			if (convertedParameterTransformer != null) {
-				convertedParams = convertedParameterTransformer.transformConvertedParameters(target, convertedParams);
-			}
-			result = method.invoke(target, convertedParams);
-        }
-
-		logger.debug("Invoked method: {}, result {}", method.getName(), result);
-
-		return hasReturnValue(method) ? mapper.valueToTree(result) : null;
-	}
-
-	private Object invokePrimitiveVarargs(Object target, Method method, List<JsonNode> params, Class<?> componentType) throws IllegalAccessException, InvocationTargetException {
-		// need to cast to object here in order to support primitives.
-		Object convertedParams = Array.newInstance(componentType, params.size());
-
-		for (int i = 0; i < params.size(); i++) {
-			JsonNode jsonNode = params.get(i);
-			Class<?> type = JsonUtil.getJavaTypeForJsonType(jsonNode);
-			Object object = mapper.convertValue(jsonNode, type);
-			logger.debug("[{}] param: {} -> {}", method.getName(), i, type.getName());
-			Array.set(convertedParams, i, object);
-		}
-
-		return method.invoke(target, convertedParams);
-	}
-
-	private Object invokeNonPrimitiveVarargs(Object target, Method method, List<JsonNode> params, Class<?> componentType) throws IllegalAccessException, InvocationTargetException {
-		Object[] convertedParams = (Object[]) Array.newInstance(componentType, params.size());
-
-		for (int i = 0; i < params.size(); i++) {
-			JsonNode jsonNode = params.get(i);
-			Class<?> type = JsonUtil.getJavaTypeForJsonType(jsonNode);
-			Object object = mapper.convertValue(jsonNode, type);
-			logger.debug("[{}] param: {} -> {}", method.getName(), i, type.getName());
-			convertedParams[i] = object;
-		}
-
-		return method.invoke(target, new Object[] { convertedParams });
-	}
-
-	private boolean hasReturnValue(Method m) {
-		return m.getGenericReturnType() != null;
-	}
-	
-	private Object[] convertJsonToParameters(Method m, List<JsonNode> params) throws IOException {
-		Object[] convertedParams = new Object[params.size()];
-		Type[] parameterTypes = m.getGenericParameterTypes();
-		
-		for (int i = 0; i < parameterTypes.length; i++) {
-			JsonParser paramJsonParser = mapper.treeAsTokens(params.get(i));
-			JavaType paramJavaType = mapper.getTypeFactory().constructType(parameterTypes[i]);
-
-			convertedParams[i] = mapper.readerFor(paramJavaType)
-				.with(DeserializationFeature.ACCEPT_SINGLE_VALUE_AS_ARRAY)
-				.readValue(paramJsonParser);
-		}
-		return convertedParams;
-	}
 	
 	/**
 	 * Convenience method for creating an error response.
@@ -606,248 +507,7 @@ public class JsonRpcBasicServer {
 		return response;
 	}
 	
-	/**
-	 * Finds the {@link Method} from the supplied {@link Set} that
-	 * best matches the rest of the arguments supplied and returns
-	 * it as a {@link AMethodWithItsArgs} class.
-	 *
-	 * @param methods    the {@link Method}s
-	 * @param paramsNode the {@link JsonNode} passed as the parameters
-	 * @return the {@link AMethodWithItsArgs}
-	 */
-	private AMethodWithItsArgs findBestMethodByParamsNode(Set<Method> methods, JsonNode paramsNode) {
-		if (hasNoParameters(paramsNode)) {
-			return findBestMethodUsingParamIndexes(methods, 0, null);
-		}
-		AMethodWithItsArgs matchedMethod;
-		if (paramsNode.isArray()) {
-			matchedMethod = findBestMethodUsingParamIndexes(methods, paramsNode.size(), ArrayNode.class.cast(paramsNode));
-		} else if (paramsNode.isObject()) {
-			matchedMethod = findBestMethodUsingParamNames(methods, collectFieldNames(paramsNode), ObjectNode.class.cast(paramsNode));
-		} else {
-			throw new IllegalArgumentException("Unknown params node type: " + paramsNode.toString());
-		}
-        if (matchedMethod == null) {
-            matchedMethod = findBestMethodForVarargs(methods, paramsNode);
-		}
-		return matchedMethod;
-	}
-	
-	private Set<String> collectFieldNames(JsonNode paramsNode) {
-		Set<String> fieldNames = new HashSet<>();
-		Iterator<String> itr = paramsNode.fieldNames();
-		while (itr.hasNext()) {
-			fieldNames.add(itr.next());
-		}
-		return fieldNames;
-	}
-	
-	private boolean hasNoParameters(JsonNode paramsNode) {
-		return isNullNodeOrValue(paramsNode);
-	}
-	
-	/**
-	 * Finds the {@link Method} from the supplied {@link Set} that
-	 * best matches the rest of the arguments supplied and returns
-	 * it as a {@link AMethodWithItsArgs} class.
-	 *
-	 * @param methods    the {@link Method}s
-	 * @param paramCount the number of expect parameters
-	 * @param paramNodes the parameters for matching types
-	 * @return the {@link AMethodWithItsArgs}
-	 */
-	private AMethodWithItsArgs findBestMethodUsingParamIndexes(Set<Method> methods, int paramCount, ArrayNode paramNodes) {
-		int numParams = isNullNodeOrValue(paramNodes) ? 0 : paramNodes.size();
-		int bestParamNumDiff = Integer.MAX_VALUE;
-		Set<Method> matchedMethods = collectMethodsMatchingParamCount(methods, paramCount, bestParamNumDiff);
-		if (matchedMethods.isEmpty()) {
-			return null;
-		}
-		Method bestMethod = getBestMatchingArgTypeMethod(paramNodes, numParams, matchedMethods);
-		return new AMethodWithItsArgs(bestMethod, paramCount, paramNodes);
-	}
-	
-	private Method getBestMatchingArgTypeMethod(ArrayNode paramNodes, int numParams, Set<Method> matchedMethods) {
-		if (matchedMethods.size() == 1 || numParams == 0) {
-			return matchedMethods.iterator().next();
-		}
-		Method bestMethod = null;
-		int mostMatches = Integer.MIN_VALUE;
-		for (Method method : matchedMethods) {
-			List<Class<?>> parameterTypes = getParameterTypes(method);
-			int numMatches = getNumArgTypeMatches(paramNodes, numParams, parameterTypes);
-			if (hasMoreMatches(mostMatches, numMatches)) {
-				mostMatches = numMatches;
-				bestMethod = method;
-			}
-		}
-		return bestMethod;
-	}
 
-    /**
-     * Finds the {@link Method} from the supplied {@link Set} that
-     * matches the method name annotation and have varargs.
-     * it as a {@link AMethodWithItsArgs} class.
-     *
-     * @param methods    the {@link Method}s
-     * @param paramsNode the {@link JsonNode} of request
-     * @return the {@link AMethodWithItsArgs}
-     */
-	private AMethodWithItsArgs findBestMethodForVarargs(Set<Method> methods, JsonNode paramsNode) {
-		for (Method method : methods) {
-            if (method.getParameterTypes().length != 1) {
-                continue;
-			}
-            if (method.isVarArgs()) {
-                return new AMethodWithItsArgs(method, paramsNode);
-			}
-		}
-		return null;
-	}
-	
-	private int getNumArgTypeMatches(ArrayNode paramNodes, int numParams, List<Class<?>> parameterTypes) {
-		int numMatches = 0;
-		for (int i = 0; i < parameterTypes.size() && i < numParams; i++) {
-			if (isMatchingType(paramNodes.get(i), parameterTypes.get(i))) {
-				numMatches++;
-			}
-		}
-		return numMatches;
-	}
-	
-	private Set<Method> collectMethodsMatchingParamCount(Set<Method> methods, int paramCount, int bestParamNumDiff) {
-		Set<Method> matchedMethods = new HashSet<>();
-		// check every method
-		for (Method method : methods) {
-			Class<?>[] paramTypes = method.getParameterTypes();
-			final int paramNumDiff = paramTypes.length - paramCount;
-			if (hasLessOrEqualAbsParamDiff(bestParamNumDiff, paramNumDiff) && acceptParamCount(paramNumDiff)) {
-				if (hasLessAbsParamDiff(bestParamNumDiff, paramNumDiff)) {
-					matchedMethods.clear();
-				}
-				matchedMethods.add(method);
-				bestParamNumDiff = paramNumDiff;
-			}
-		}
-		return matchedMethods;
-	}
-	
-	private boolean hasLessAbsParamDiff(int bestParamNumDiff, int paramNumDiff) {
-		return Math.abs(paramNumDiff) < Math.abs(bestParamNumDiff);
-	}
-	
-	private boolean acceptParamCount(int paramNumDiff) {
-		return paramNumDiff == 0 || acceptNonExactParam(paramNumDiff);
-	}
-	
-	private boolean acceptNonExactParam(int paramNumDiff) {
-		return acceptMoreParam(paramNumDiff) || acceptLessParam(paramNumDiff);
-	}
-	
-	private boolean acceptLessParam(int paramNumDiff) {
-		return allowLessParams && paramNumDiff > 0;
-	}
-	
-	private boolean acceptMoreParam(int paramNumDiff) {
-		return allowExtraParams && paramNumDiff < 0;
-	}
-	
-	private boolean hasLessOrEqualAbsParamDiff(int bestParamNumDiff, int paramNumDiff) {
-		return Math.abs(paramNumDiff) <= Math.abs(bestParamNumDiff);
-	}
-	
-	/**
-	 * Finds the {@link Method} from the supplied {@link Set} that best matches the rest of the arguments supplied and
-	 * returns it as a {@link AMethodWithItsArgs} class.
-	 *
-	 * @param methods    the {@link Method}s
-	 * @param paramNames the parameter allNames
-	 * @param paramNodes the parameters for matching types
-	 * @return the {@link AMethodWithItsArgs}
-	 */
-	private AMethodWithItsArgs findBestMethodUsingParamNames(Set<Method> methods, Set<String> paramNames, ObjectNode paramNodes) {
-		ParameterCount max = new ParameterCount();
-		
-		for (Method method : methods) {
-			List<Class<?>> parameterTypes = getParameterTypes(method);
-			
-			int typeNameCountDiff = parameterTypes.size() - paramNames.size();
-			if (!acceptParamCount(typeNameCountDiff)) {
-				continue;
-			}
-			
-			ParameterCount parStat = new ParameterCount(paramNames, paramNodes, parameterTypes, method);
-			if (!acceptParamCount(parStat.nameCount - paramNames.size())) {
-				continue;
-			}
-			if (hasMoreMatches(max.nameCount, parStat.nameCount) || parStat.nameCount == max.nameCount && hasMoreMatches(max.typeCount, parStat.typeCount)) {
-				max = parStat;
-			}
-		}
-		if (max.method == null) {
-			return null;
-		}
-		return new AMethodWithItsArgs(max.method, paramNames, max.allNames, paramNodes);
-		
-	}
-	
-	private boolean hasMoreMatches(int maxMatchingParams, int numMatchingParams) {
-		return numMatchingParams > maxMatchingParams;
-	}
-	
-	private boolean missingAnnotation(JsonRpcParam name) {
-		return name == null;
-	}
-	
-	/**
-	 * Determines whether or not the given {@link JsonNode} matches
-	 * the given type.  This method is limited to a few java types
-	 * only and shouldn't be used to determine with great accuracy
-	 * whether or not the types match.
-	 *
-	 * @param node the {@link JsonNode}
-	 * @param type the {@link Class}
-	 * @return true if the types match, false otherwise
-	 */
-	@SuppressWarnings("SimplifiableIfStatement")
-	private boolean isMatchingType(JsonNode node, Class<?> type) {
-		if (node.isNull()) {
-			return true;
-		}
-		if (node.isTextual()) {
-			return String.class.isAssignableFrom(type);
-		}
-		if (node.isNumber()) {
-			return isNumericAssignable(type);
-		}
-		if (node.isArray() && type.isArray()) {
-			return node.size() > 0 && isMatchingType(node.get(0), type.getComponentType());
-		}
-		if (node.isArray()) {
-			return type.isArray() || Collection.class.isAssignableFrom(type);
-		}
-		if (node.isBinary()) {
-			return byteOrCharAssignable(type);
-		}
-		if (node.isBoolean()) {
-			return boolean.class.isAssignableFrom(type) || Boolean.class.isAssignableFrom(type);
-		}
-		if (node.isObject() || node.isPojo()) {
-			return !type.isPrimitive() && !String.class.isAssignableFrom(type) &&
-					!Number.class.isAssignableFrom(type) && !Boolean.class.isAssignableFrom(type);
-		}
-		return false;
-	}
-	
-	private boolean byteOrCharAssignable(Class<?> type) {
-		return byte[].class.isAssignableFrom(type) || Byte[].class.isAssignableFrom(type) ||
-				char[].class.isAssignableFrom(type) || Character[].class.isAssignableFrom(type);
-	}
-	
-	private boolean isNumericAssignable(Class<?> type) {
-		return Number.class.isAssignableFrom(type) || short.class.isAssignableFrom(type) || int.class.isAssignableFrom(type)
-				|| long.class.isAssignableFrom(type) || float.class.isAssignableFrom(type) || double.class.isAssignableFrom(type);
-	}
 	
 	private JsonError writeAndFlushValueError(OutputStream output, ErrorObjectWithJsonError value) throws IOException {
 		logger.debug("failed {}", value);
@@ -931,7 +591,7 @@ public class JsonRpcBasicServer {
 	 * @param allowExtraParams true or false
 	 */
 	public void setAllowExtraParams(boolean allowExtraParams) {
-		this.allowExtraParams = allowExtraParams;
+		ReflectionUtil.allowExtraParams = allowExtraParams;
 	}
 	
 	/**
@@ -941,7 +601,7 @@ public class JsonRpcBasicServer {
 	 * @param allowLessParams the allowLessParams to set
 	 */
 	public void setAllowLessParams(boolean allowLessParams) {
-		this.allowLessParams = allowLessParams;
+		ReflectionUtil.allowLessParams = allowLessParams;
 	}
 
 	/**
@@ -985,7 +645,7 @@ public class JsonRpcBasicServer {
 	 * @param convertedParameterTransformer the transformer to set
 	 */
 	public void setConvertedParameterTransformer(ConvertedParameterTransformer convertedParameterTransformer) {
-		this.convertedParameterTransformer = convertedParameterTransformer;
+		ReflectionUtil.convertedParameterTransformer = convertedParameterTransformer;
 	}
 	
 	/**
@@ -1024,96 +684,7 @@ public class JsonRpcBasicServer {
 		}
 	}
 	
-	private class ParameterCount {
-		private final int typeCount;
-		private final int nameCount;
-		private final List<JsonRpcParam> allNames;
-		private final Method method;
-		
-		public ParameterCount(Set<String> paramNames, ObjectNode paramNodes, List<Class<?>> parameterTypes, Method method) {
-			this.allNames = getAnnotatedParameterNames(method);
-			this.method = method;
-			int typeCount = 0;
-			int nameCount = 0;
-			int at = 0;
-			
-			for (JsonRpcParam name : this.allNames) {
-				if (missingAnnotation(name)) {
-					continue;
-				}
-				String paramName = name.value();
-				boolean hasParamName = paramNames.contains(paramName);
-				if (hasParamName) {
-					nameCount += 1;
-				}
-				if (hasParamName && isMatchingType(paramNodes.get(paramName), parameterTypes.get(at))) {
-					typeCount += 1;
-				}
-				at += 1;
-			}
-			this.typeCount = typeCount;
-			this.nameCount = nameCount;
-		}
-		
-		@SuppressWarnings("Convert2streamapi")
-		private List<JsonRpcParam> getAnnotatedParameterNames(Method method) {
-			List<JsonRpcParam> parameterNames = new ArrayList<>();
-			for (List<? extends Annotation> webParamAnnotation : getWebParameterAnnotations(method)) {
-				if (!webParamAnnotation.isEmpty()) {
-					parameterNames.add(createNewJsonRcpParamType(webParamAnnotation.get(0)));
-				}
-			}
-			for (List<JsonRpcParam> annotation : getJsonRpcParamAnnotations(method)) {
-				if (!annotation.isEmpty()) {
-					parameterNames.add(annotation.get(0));
-				}
-			}
-			return parameterNames;
-		}
-		
-		private List<? extends List<? extends Annotation>> getWebParameterAnnotations(Method method) {
-			if (WEB_PARAM_ANNOTATION_CLASS == null) {
-				return new ArrayList<>();
-			}
-			return ReflectionUtil.getParameterAnnotations(method, WEB_PARAM_ANNOTATION_CLASS);
-		}
-		
-		private JsonRpcParam createNewJsonRcpParamType(final Annotation annotation) {
-			return new JsonRpcParam() {
-				public Class<? extends Annotation> annotationType() {
-					return JsonRpcParam.class;
-				}
-				
-				public String value() {
-					try {
-						return (String) WEB_PARAM_NAME_METHOD.invoke(annotation);
-					} catch (Exception e) {
-						throw new RuntimeException(e);
-					}
-				}
-			};
-		}
-		
-		private List<List<JsonRpcParam>> getJsonRpcParamAnnotations(Method method) {
-			return ReflectionUtil.getParameterAnnotations(method, JsonRpcParam.class);
-		}
-		
-		public ParameterCount() {
-			typeCount = -1;
-			nameCount = -1;
-			allNames = null;
-			method = null;
-		}
-		
-		public int getTypeCount() {
-			return typeCount;
-		}
-		
-		public int getNameCount() {
-			return nameCount;
-		}
-		
-	}
+
 
 	public List<JsonRpcInterceptor> getInterceptorList() {
 		return interceptorList;

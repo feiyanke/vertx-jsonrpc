@@ -15,8 +15,8 @@ public @interface JsonRpcService {
 	
 	/**
 	 * The path that the service is available at.
-	 *
-	 * @return the service path
+	 * 	 *
+	 * 	 * @return the service path
 	 */
 	String value();
 }

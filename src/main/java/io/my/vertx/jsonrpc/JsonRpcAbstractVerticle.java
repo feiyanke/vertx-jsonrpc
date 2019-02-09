@@ -3,36 +3,29 @@ package io.my.vertx.jsonrpc;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.googlecode.jsonrpc4j.*;
+import com.googlecode.jsonrpc4j.ErrorObjectWithJsonError;
+import com.googlecode.jsonrpc4j.ErrorResolver;
+import com.googlecode.jsonrpc4j.ReadContext;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.ByteBufInputStream;
 import io.netty.buffer.ByteBufOutputStream;
 import io.vertx.core.AbstractVerticle;
 import io.vertx.core.Future;
+import io.vertx.core.Handler;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.net.NetSocket;
-import lombok.extern.slf4j.Slf4j;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import sun.reflect.generics.reflectiveObjects.NotImplementedException;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.math.BigDecimal;
 import java.util.HashMap;
 import java.util.Map;
 
-class JsonRpcException extends Exception {
-    ErrorResolver.JsonError error;
-    public JsonRpcException(ErrorResolver.JsonError jsonError) {
-        super(jsonError.message);
-        this.error = jsonError;
-    }
-}
-
-@Slf4j
-public class JsonRpcVerticle extends AbstractVerticle {
+public class JsonRpcAbstractVerticle extends AbstractVerticle {
 
     public static final String PARAMS = "params";
     public static final String METHOD = "method";
@@ -46,7 +39,7 @@ public class JsonRpcVerticle extends AbstractVerticle {
     public static final String VERSION = "2.0";
     public static final String NULL = "null";
 
-    private static final Logger log = LoggerFactory.getLogger(JsonRpcVerticle.class);
+    private static final Logger log = LoggerFactory.getLogger(JsonRpcAbstractVerticle.class);
 
     private NetSocket socket;
     private ObjectMapper mapper;
@@ -59,7 +52,7 @@ public class JsonRpcVerticle extends AbstractVerticle {
         return future;
     }
 
-    public JsonRpcVerticle(NetSocket socket) {
+    public JsonRpcAbstractVerticle(NetSocket socket) {
         this.socket = socket;
         this.mapper = new ObjectMapper();
     }
@@ -89,13 +82,20 @@ public class JsonRpcVerticle extends AbstractVerticle {
             try {
                 readContext.assertReadable();
                 JsonNode node = readContext.nextValue();
-                ByteBuf buf = ByteBufAllocator.DEFAULT.buffer();
-                OutputStream output = new ByteBufOutputStream(buf);
+
                 //should fetch the response message, and fire the invoke reponse listener
-                handleJsonNode(node, output);
-                Buffer buffer1 = Buffer.buffer(buf);
-                log.info("output: {}" + buffer1);
-                socket.write(buffer1);
+                handleJsonNode(node, objectNode -> {
+                    ByteBuf buf = ByteBufAllocator.DEFAULT.buffer();
+                    OutputStream output = new ByteBufOutputStream(buf);
+                    try {
+                        writeAndFlushValue(output, objectNode);
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                    }
+                    Buffer buffer1 = Buffer.buffer(buf);
+                    log.info("output: {}" + buffer1);
+                    socket.write(buffer1);
+                });
             } catch (IOException e) {
                 e.printStackTrace();
             }
@@ -123,14 +123,17 @@ public class JsonRpcVerticle extends AbstractVerticle {
     }
 
 
-    void handleJsonNode(final JsonNode node, OutputStream output) throws IOException {
+    private void handleJsonNode(JsonNode node, Handler<ObjectNode> handler) {
+
         if (node.isArray()) {
-            writeAndFlushValueError(output, createResponseError(VERSION, null, ErrorResolver.JsonError.INVALID_REQUEST));
+            handler.handle(createResponseError(VERSION, 0, ErrorResolver.JsonError.INVALID_REQUEST));
             return;
         }
+
         if (node.isObject()) {
 
             long id = node.get(ID).asLong();
+            String jsonRpc = node.get(VERSION).asText();
 
             if (isResponse((ObjectNode) node)) {
                 //check id, and fire the response listener accordingly
@@ -145,24 +148,49 @@ public class JsonRpcVerticle extends AbstractVerticle {
             }
 
             if (!isValidRequest((ObjectNode) node)) {
-                writeAndFlushValueError(output, createResponseError(VERSION, null, ErrorResolver.JsonError.INVALID_REQUEST));
+                handler.handle(createResponseError(VERSION, id, ErrorResolver.JsonError.INVALID_REQUEST));
             } else {
-                handleRequest((ObjectNode) node, output);
+                //should execute in worker thread
+                vertx.<ObjectNode>executeBlocking(f-> handleRequest((ObjectNode) node, f), false, ar -> {
+                    if (ar.succeeded()) {
+                        if (!isNotificationRequest(id)) {
+                            handler.handle(ar.result());
+                        }
+                    } else {
+                        handler.handle(ar.result());
+                    }
+                });
             }
         }
     }
 
-    private void writeAndFlushValue(OutputStream output, ObjectNode value) throws IOException {
+    /**
+     * Creates a success response.
+     *
+     * @param jsonRpc the version string
+     * @param id      the id of the request
+     * @param result  the result object
+     * @return the response object
+     */
+    protected ObjectNode createResponseSuccess(String jsonRpc, long id, JsonNode result) {
+        ObjectNode response = mapper.createObjectNode();
+        response.put(JSONRPC, jsonRpc);
+        response.put(ID, id);
+        response.set(RESULT, result);
+        return response;
+    }
+
+    protected void writeAndFlushValue(OutputStream output, ObjectNode value) throws IOException {
         log.debug("Response: {}", value);
         mapper.writeValue(output, value);
     }
 
-    private void writeAndFlushValueError(OutputStream output, ErrorObjectWithJsonError value) throws IOException {
+    protected void writeAndFlushValueError(OutputStream output, ErrorObjectWithJsonError value) throws IOException {
         log.debug("failed {}", value);
         writeAndFlushValue(output, value.node);
     }
 
-    private ErrorObjectWithJsonError createResponseError(String jsonRpc, Long id, ErrorResolver.JsonError errorObject) {
+    protected ObjectNode createResponseError(String jsonRpc, long id, ErrorResolver.JsonError errorObject) {
         ObjectNode response = mapper.createObjectNode();
         ObjectNode error = mapper.createObjectNode();
         error.put(ERROR_CODE, errorObject.code);
@@ -170,7 +198,7 @@ public class JsonRpcVerticle extends AbstractVerticle {
         response.put(JSONRPC, jsonRpc);
         response.put(ID, id);
         response.set(ERROR, error);
-        return new ErrorObjectWithJsonError(response, errorObject);
+        return response;
     }
 
     private boolean isResponse(ObjectNode node) {
@@ -197,6 +225,8 @@ public class JsonRpcVerticle extends AbstractVerticle {
         return node.has(JSONRPC) && node.has(METHOD);
     }
 
-    protected void handleRequest(ObjectNode node, OutputStream output) {
+    protected void handleRequest(ObjectNode node, Future<ObjectNode> future) {
+        log.info("handleRequest: {}", node);
+        future.fail(new NotImplementedException());
     }
 }

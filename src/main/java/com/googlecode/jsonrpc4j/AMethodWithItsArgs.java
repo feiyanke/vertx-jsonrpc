@@ -12,7 +12,7 @@ import java.util.*;
 /**
  * Simple inner class for the {@code findXXX} methods.
  */
-class AMethodWithItsArgs {
+public class AMethodWithItsArgs {
     public final List<JsonNode> arguments = new ArrayList<>();
     public final Method method;
 

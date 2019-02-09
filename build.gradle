@@ -45,8 +45,7 @@ dependencies {
         jettyVersion = '9.4.0.RC3'
         slf4jVersion = '1.7.22'
     }
-
-    provided group: 'org.projectlombok', name: 'lombok', version: '1.18.2'
+    
     compile group: 'io.vertx', name: 'vertx-core', version: '3.6.3'
 
     compile 'net.iharder:base64:2.3.9'

@@ -39,7 +39,8 @@ public interface ErrorResolver {
 		public static final JsonError INTERNAL_ERROR = new JsonError(-32603, "internal error", null);
 		public static final JsonError ERROR_NOT_HANDLED = new JsonError(-32001, "error not handled", null);
 		public static final JsonError BULK_ERROR = new JsonError(-32002, "bulk error", null);
-		
+		public static final JsonError METHOD_HANDLE_ERROR = new JsonError(-32003, "method handle error", null);
+
 		public static final int CUSTOM_SERVER_ERROR_UPPER = -32000;
 		public static final int CUSTOM_SERVER_ERROR_LOWER = -32099;
 		
