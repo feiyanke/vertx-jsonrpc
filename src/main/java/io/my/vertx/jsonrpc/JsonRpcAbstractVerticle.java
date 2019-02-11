@@ -1,18 +1,18 @@
 package io.my.vertx.jsonrpc;
 
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.databind.JavaType;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.googlecode.jsonrpc4j.ErrorObjectWithJsonError;
-import com.googlecode.jsonrpc4j.ErrorResolver;
-import com.googlecode.jsonrpc4j.ReadContext;
+import com.googlecode.jsonrpc4j.*;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.ByteBufInputStream;
 import io.netty.buffer.ByteBufOutputStream;
-import io.vertx.core.AbstractVerticle;
-import io.vertx.core.Future;
-import io.vertx.core.Handler;
+import io.netty.util.concurrent.DefaultPromise;
+import io.netty.util.concurrent.Promise;
+import io.vertx.core.*;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.net.NetSocket;
 import org.slf4j.Logger;
@@ -22,8 +22,15 @@ import sun.reflect.generics.reflectiveObjects.NotImplementedException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.lang.reflect.Type;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ExecutionException;
+
+import static com.googlecode.jsonrpc4j.JsonRpcBasicServer.RESULT;
 
 public class JsonRpcAbstractVerticle extends AbstractVerticle {
 
@@ -44,12 +51,14 @@ public class JsonRpcAbstractVerticle extends AbstractVerticle {
     private NetSocket socket;
     private ObjectMapper mapper;
 
-    private Map<Long, Future<JsonNode>> futureMap = new HashMap<>();
+    private Map<Long, Promise<JsonNode>> promiseMap = new HashMap<>();
 
-    private Future<JsonNode> makeFuture(long id) {
-        Future<JsonNode> future = Future.future();
-        futureMap.put(id, future);
-        return future;
+    private JsonRpcClient jsonRpcClient = new JsonRpcClient();
+
+    private Promise<JsonNode> makePromise(long id) {
+        Promise<JsonNode> promise = new DefaultPromise<JsonNode>(vertx.nettyEventLoopGroup().next());
+        promiseMap.put(id, promise);
+        return promise;
     }
 
     public JsonRpcAbstractVerticle(NetSocket socket) {
@@ -138,9 +147,16 @@ public class JsonRpcAbstractVerticle extends AbstractVerticle {
             if (isResponse((ObjectNode) node)) {
                 //check id, and fire the response listener accordingly
                 //if id is not exist, the just discard it and make a log.
-                if (futureMap.containsKey(id)) {
-                    log.info("Handle Result: {}", node);
-                    futureMap.get(id).complete(node);
+                if (promiseMap.containsKey(id)) {
+                    if (isError((ObjectNode) node)) {
+                        log.info("Handle Error: {}", node);
+                        //TODO
+                        promiseMap.get(id).setFailure(new Exception());
+                    } else {
+                        log.info("Handle Result: {}", node);
+                        promiseMap.get(id).setSuccess(node);
+                    }
+
                 } else {
                     log.info("No Handle Result: {}", node);
                 }
@@ -228,5 +244,46 @@ public class JsonRpcAbstractVerticle extends AbstractVerticle {
     protected void handleRequest(ObjectNode node, Future<ObjectNode> future) {
         log.info("handleRequest: {}", node);
         future.fail(new NotImplementedException());
+    }
+
+    private long id = 1;
+
+    protected Promise<JsonNode> makeInvoke(String methodName, Object argument) throws IOException {
+        ByteBuf buf = ByteBufAllocator.DEFAULT.buffer();
+        OutputStream output = new ByteBufOutputStream(buf);
+        jsonRpcClient.invoke(methodName, argument, output, String.valueOf(id));
+        id+=1;
+        Buffer buffer1 = Buffer.buffer(buf);
+        log.info("invoke: {}" + buffer1);
+        socket.write(buffer1);
+        return makePromise(id);
+    }
+
+    protected Object readResponse(Type returnType, Promise<JsonNode> promise) throws ExecutionException, InterruptedException, IOException {
+        JsonNode node = promise.get();
+        JsonParser returnJsonParser = mapper.treeAsTokens(node.get(RESULT));
+        JavaType returnJavaType = mapper.getTypeFactory().constructType(returnType);
+        return mapper.readValue(returnJsonParser, returnJavaType);
+    }
+
+    class ClientInvocationHandler implements InvocationHandler {
+
+        private String serviceName;
+        public ClientInvocationHandler(Class clazz) {
+            this.serviceName = ReflectionUtil.getServiceName(clazz);
+        }
+
+        @Override
+        public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+            final Object arguments = ReflectionUtil.parseArguments(method, args);
+            final String methodName = serviceName + "." + ReflectionUtil.getMethodName(method);
+            return readResponse(method.getGenericReturnType(), makeInvoke(methodName, arguments));
+
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    public <T> T createClientProxy(Class<T> proxyInterface) {
+        return (T) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{proxyInterface}, new ClientInvocationHandler(proxyInterface));
     }
 }

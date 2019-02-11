@@ -52,14 +52,26 @@ public abstract class ReflectionUtil {
         }
     }
 
-	public static String getServiceName(Object service) {
-	    Class clazz = service.getClass();
-	    if (clazz.isAnnotationPresent(JsonRpcService.class)) {
+    public static String getServiceName(Class clazz) {
+        if (clazz.isAnnotationPresent(JsonRpcService.class)) {
             JsonRpcService jsonRpcService = (JsonRpcService) clazz.getAnnotation(JsonRpcService.class);
             return jsonRpcService.value();
         } else {
-	        return clazz.getName();
+            return clazz.getName();
         }
+    }
+
+    public static String getMethodName(Method method) {
+        if (method.isAnnotationPresent(JsonRpcMethod.class)) {
+            JsonRpcMethod jsonRpcMethod = (JsonRpcMethod) method.getAnnotation(JsonRpcMethod.class);
+            return jsonRpcMethod.value();
+        } else {
+            return method.getName();
+        }
+    }
+
+	public static String getServiceName(Object service) {
+        return getServiceName(service.getClass());
     }
 	/**
 	 * Finds methods with the given name on the given class.

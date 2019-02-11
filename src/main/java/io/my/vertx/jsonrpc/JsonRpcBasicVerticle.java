@@ -8,6 +8,8 @@ import io.vertx.core.net.NetSocket;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
+import java.io.OutputStream;
 import java.lang.reflect.Method;
 import java.util.Set;
 
@@ -19,12 +21,15 @@ public class JsonRpcBasicVerticle extends JsonRpcAbstractVerticle {
 
     private static final Logger logger = LoggerFactory.getLogger(JsonRpcBasicVerticle.class);
     private Object service;
+    private Class client;
     private String serviceName;
+    private String clientName;
 
-    public JsonRpcBasicVerticle(NetSocket socket, Object service) {
+    public JsonRpcBasicVerticle(NetSocket socket, Object service, Class client) {
         super(socket);
         this.service = service;
         this.serviceName = ReflectionUtil.getServiceName(service);
+        this.clientName = ReflectionUtil.getServiceName(client);
     }
 
     @Override
@@ -91,4 +96,13 @@ public class JsonRpcBasicVerticle extends JsonRpcAbstractVerticle {
     protected Object getHandler(String serviceName) {
         return service;
     }
+
+    public <T> T getClient(Class<T> clazz) {
+        //do proxy
+        return null;
+    }
+
+
+
+
 }

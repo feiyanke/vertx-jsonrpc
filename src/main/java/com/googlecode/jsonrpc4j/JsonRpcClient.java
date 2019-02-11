@@ -172,7 +172,7 @@ public class JsonRpcClient {
 	 * @throws IOException on error
 	 * @see #writeRequest(String, Object, OutputStream, String)
 	 */
-	private void invoke(String methodName, Object argument, OutputStream output, String id) throws IOException {
+	public void invoke(String methodName, Object argument, OutputStream output, String id) throws IOException {
 		writeRequest(methodName, argument, output, id);
 		output.flush();
 	}
